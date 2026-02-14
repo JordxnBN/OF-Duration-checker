@@ -20,7 +20,7 @@ function createMainWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
       preload: path.join(import.meta.dirname, "preload.mjs"),
     },
   });
