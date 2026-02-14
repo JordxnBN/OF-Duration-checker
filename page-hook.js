@@ -390,9 +390,23 @@
     if (!isOnlyFansHost) return false;
 
     const path = parsed.pathname.toLowerCase();
-    const looksApi = path.includes('/api');
-    if (!looksApi) return false;
-    return true;
+    if (!path.includes('/api')) return false;
+
+    // Messages-only mode: only inspect chat/message-like API paths.
+    // This reduces false positives from posts/feed/subscriptions endpoints.
+    const messageApiHints = [
+      '/chats',
+      '/chat',
+      '/messages',
+      '/message',
+      '/ppv',
+      '/dialog',
+      '/conversation',
+    ];
+    for (const hint of messageApiHints) {
+      if (path.includes(hint)) return true;
+    }
+    return false;
   }
 
   function deriveContext(node, parentContext) {
@@ -825,20 +839,25 @@
     try {
       const data = await response.clone().json();
       const entries = collectDurationEntries(data, url);
-      if (entries.length > 0) emitDurationEntries(entries, url, requestStartedAt);
+      const messageEntries = entries.filter((entry) => entry && entry.messageId);
+      if (messageEntries.length > 0) {
+        emitDurationEntries(messageEntries, url, requestStartedAt);
+      }
 
       const summaries = collectMessageSummaries(data, url);
       if (summaries.length > 0) emitMessageSummaries(summaries, url, requestStartedAt);
       debugLog('fetch processed', {
         url,
-        entries: entries.length,
+        entries: messageEntries.length,
         summaries: summaries.length,
         summaryPreview: buildSummaryDebugPreview(summaries),
         summaryTop: buildSummaryDebugLine(summaries),
       });
 
       const bodyDuration =
-        entries.length > 0 ? chooseBestEntry(entries) : findDurationInObj(data, new WeakSet());
+        messageEntries.length > 0
+          ? chooseBestEntry(messageEntries)
+          : null;
       if (bodyDuration && bodyDuration.seconds > 0) {
         emitDuration(bodyDuration.display, url, requestStartedAt);
       }
@@ -865,20 +884,25 @@
     if (!data) return;
 
     const entries = collectDurationEntries(data, url);
-    if (entries.length > 0) emitDurationEntries(entries, url, requestStartedAt);
+    const messageEntries = entries.filter((entry) => entry && entry.messageId);
+    if (messageEntries.length > 0) {
+      emitDurationEntries(messageEntries, url, requestStartedAt);
+    }
 
     const summaries = collectMessageSummaries(data, url);
     if (summaries.length > 0) emitMessageSummaries(summaries, url, requestStartedAt);
     debugLog('xhr processed', {
       url,
-      entries: entries.length,
+      entries: messageEntries.length,
       summaries: summaries.length,
       summaryPreview: buildSummaryDebugPreview(summaries),
       summaryTop: buildSummaryDebugLine(summaries),
     });
 
     const bodyDuration =
-      entries.length > 0 ? chooseBestEntry(entries) : findDurationInObj(data, new WeakSet());
+      messageEntries.length > 0
+        ? chooseBestEntry(messageEntries)
+        : null;
     if (bodyDuration && bodyDuration.seconds > 0) {
       emitDuration(bodyDuration.display, url, requestStartedAt);
     }
