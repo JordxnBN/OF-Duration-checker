@@ -4,6 +4,10 @@ Shows duration/length of locked content by reading the page's API responses and 
 
 Note: you must click a locked message to trigger the lookup and reveal the duration.
 
+Current behavior: this build is **messages-only**. It works from the **Messages/DMs tab** (chat locked messages). It does not currently scan posts/feed pages.
+
+Want it to work everywhere? The usual GitHub way is to open a **Pull Request (PR)** (a proposed change that can be reviewed before merging). If you are not changing code yourself, open an **Issue** asking for “scan posts/feed too” and include example URLs/endpoints where durations appear.
+
 ## Install (Chrome / Edge)
 
 1. Open `chrome://extensions`
