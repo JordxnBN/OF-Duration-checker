@@ -2,6 +2,8 @@
 
 Shows duration/length of locked content by reading the page's API responses and displaying a small overlay.
 
+Note: you must click a locked message to trigger the lookup and reveal the duration.
+
 ## Install (Chrome / Edge)
 
 1. Open `chrome://extensions`
