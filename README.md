@@ -6,7 +6,7 @@ Note: you must click a locked message to trigger the lookup and reveal the durat
 
 Current behavior: this build is **messages-only**. It works from the **Messages/DMs tab** (chat locked messages). It does not currently scan posts/feed pages.
 
-Want it to work everywhere? The usual GitHub way is to open a **Pull Request (PR)** (a proposed change that can be reviewed before merging). If you are not changing code yourself, open an **Issue** asking for “scan posts/feed too” and include example URLs/endpoints where durations appear.
+To request “scan everywhere” support (posts/feed included), open an Issue with example URLs/endpoints, or submit a Pull Request implementing the change.
 
 ## Install (Chrome / Edge)
 
