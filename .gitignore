@@ -1,43 +1,13 @@
-# Logs
-logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
+# Local scratch/backup folder (not part of the extension)
+.tmp_local/
 
-# Environment
-.env
-.env.*
-!.env.example
-
-node_modules
-dist
-dist-ssr
-*.local
-release
-.electron-vite
-
-# Local data
-*.sqlite
-*.sqlite3
-*.db
-*.db-journal
-*.wal
-*.shm
-
-# Tooling caches
-.vite
-coverage
-
-# Editor directories and files
-.vscode/*
-!.vscode/extensions.json
-.idea
+# OS/editor noise
 .DS_Store
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
+Thumbs.db
+.vscode/
+.idea/
+
+# Archives / build outputs (if you zip the extension)
+*.zip
+dist/
+

@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "OnlyFans Duration Viewer",
+  "version": "1.0.0",
+  "description": "Shows duration/length of locked content from network responses",
+  "content_scripts": [
+    {
+      "matches": ["*://onlyfans.com/*", "*://*.onlyfans.com/*"],
+      "js": ["content.js"],
+      "css": ["overlay.css"],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["page-hook.js"],
+      "matches": ["*://onlyfans.com/*", "*://*.onlyfans.com/*"]
+    }
+  ]
+}
