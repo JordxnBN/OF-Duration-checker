@@ -8,6 +8,22 @@
   const MAX_VISIBLE_SUMMARIES = 20;
   const CLICK_UPDATE_WINDOW_MS = 8000;
   const CLICK_REQUEST_EPSILON_MS = 75;
+  const CLICK_NEARBY_RADIUS_PX = 28;
+  const CLICK_NEARBY_OFFSETS = [
+    [0, 0],
+    [18, 0],
+    [-18, 0],
+    [0, 18],
+    [0, -18],
+    [CLICK_NEARBY_RADIUS_PX, 0],
+    [-CLICK_NEARBY_RADIUS_PX, 0],
+    [0, CLICK_NEARBY_RADIUS_PX],
+    [0, -CLICK_NEARBY_RADIUS_PX],
+    [20, 20],
+    [-20, 20],
+    [20, -20],
+    [-20, -20],
+  ];
   const HYBRID_FALLBACK_MIN_SCORE = 5;
   const HYBRID_FALLBACK_MIN_MARGIN = 2;
   const CLICK_LOADING_TEXT = 'Looking up...';
@@ -242,6 +258,99 @@
     return { imageCount: -1, videoCount: -1 };
   }
 
+  function buildSignalText(node) {
+    if (!(node instanceof Element)) return '';
+    return [
+      node.getAttribute('class') || '',
+      node.getAttribute('id') || '',
+      node.getAttribute('data-testid') || '',
+      node.getAttribute('aria-label') || '',
+      node.getAttribute('href') || '',
+      (node.textContent || '').slice(0, 280),
+    ]
+      .join(' ')
+      .toLowerCase();
+  }
+
+  function scoreLockedSignal(blob) {
+    if (typeof blob !== 'string' || !blob) return 0;
+    let score = 0;
+    if (blob.includes('unlock')) score += 8;
+    if (blob.includes('locked')) score += 7;
+    if (blob.includes('ppv')) score += 6;
+    if (blob.includes('purchase')) score += 5;
+    if (blob.includes('pay')) score += 3;
+    if (/\$\s*\d/.test(blob)) score += 6;
+    else if (blob.includes('$')) score += 3;
+    if (blob.includes('message')) score += 1;
+    if (blob.includes('chat')) score += 1;
+    return score;
+  }
+
+  function collectElementsNearClick(event) {
+    const seen = new Set();
+    const out = [];
+
+    function pushElement(node) {
+      if (!(node instanceof Element)) return;
+      if (seen.has(node)) return;
+      seen.add(node);
+      out.push(node);
+    }
+
+    if (event.target instanceof Element) {
+      pushElement(event.target);
+      let parent = event.target.parentElement;
+      let depth = 0;
+      while (parent && depth < 5) {
+        pushElement(parent);
+        parent = parent.parentElement;
+        depth += 1;
+      }
+    }
+
+    const x = Number(event.clientX);
+    const y = Number(event.clientY);
+    if (
+      Number.isFinite(x) &&
+      Number.isFinite(y) &&
+      typeof document.elementsFromPoint === 'function'
+    ) {
+      for (const [dx, dy] of CLICK_NEARBY_OFFSETS) {
+        const nodes = document.elementsFromPoint(x + dx, y + dy);
+        for (const node of nodes) {
+          pushElement(node);
+          if (out.length >= 100) break;
+        }
+        if (out.length >= 100) break;
+      }
+    }
+
+    return out;
+  }
+
+  function findBestLockedRootNearClick(event) {
+    const elements = collectElementsNearClick(event);
+    let bestNode = null;
+    let bestScore = 0;
+
+    for (const element of elements) {
+      let node = element.closest('button, a, [role="button"], article, li, div') || element;
+      let depth = 0;
+      while (node && depth < 8) {
+        const score = scoreLockedSignal(buildSignalText(node));
+        if (score > bestScore) {
+          bestScore = score;
+          bestNode = node;
+        }
+        node = node.parentElement;
+        depth += 1;
+      }
+    }
+
+    return bestNode;
+  }
+
   function findClickCardRoot(target) {
     if (!(target instanceof Element)) return null;
     let node = target.closest('button, a, [role="button"], article, li, div');
@@ -260,8 +369,8 @@
     return best;
   }
 
-  function extractClickFingerprint(target) {
-    const root = findClickCardRoot(target);
+  function extractClickFingerprint(target, preferredRoot) {
+    const root = preferredRoot instanceof Element ? preferredRoot : findClickCardRoot(target);
     const text = root ? (root.textContent || '').replace(/\s+/g, ' ').trim() : '';
     const priceCents = extractPriceCentsFromText(text);
     const counts = parseCountHintsFromText(text, priceCents);
@@ -290,16 +399,21 @@
     activeClickSession = null;
   }
 
-  function setActiveClickSession(messageIds, target, startedAt) {
+  function setActiveClickSession(messageIds, target, startedAt, preferredRoot) {
     clearClickSessionTimer();
     const normalizedMessageIds = normalizeIdSet(messageIds);
-    const clickFingerprint = extractClickFingerprint(target);
+    const clickFingerprint = extractClickFingerprint(target, preferredRoot);
     activeClickSession = {
       startedAt,
       messageIds: normalizedMessageIds,
       expiresAt: startedAt + CLICK_UPDATE_WINDOW_MS,
       resolved: false,
-      target: target instanceof Element ? target : null,
+      target:
+        preferredRoot instanceof Element
+          ? preferredRoot
+          : target instanceof Element
+            ? target
+            : null,
       clickFingerprint,
     };
     debugLog('session started', {
@@ -420,6 +534,13 @@
     }
 
     return ids;
+  }
+
+  function mergeIdSets(baseIds, extraIds) {
+    if (!baseIds || !extraIds) return;
+    for (const id of extraIds.messageIds || []) baseIds.messageIds.add(id);
+    for (const id of extraIds.mediaIds || []) baseIds.mediaIds.add(id);
+    for (const id of extraIds.postIds || []) baseIds.postIds.add(id);
   }
 
   function getBestEntryFromMap(map, idSet) {
@@ -685,22 +806,12 @@
       .join(' ')
       .toLowerCase();
 
-    const keywordMatch = [
-      'message',
-      'chat',
-      'locked',
-      'unlock',
-      'purchase',
-      'pay',
-      'ppv',
-      'video',
-      'media',
-    ].some((token) => blob.includes(token));
+    const signalScore = scoreLockedSignal(blob);
 
     const inChatView = window.location.pathname.toLowerCase().includes('/chats');
-    if (inChatView && keywordMatch) return true;
+    if (inChatView && signalScore >= 3) return true;
 
-    return blob.includes('locked') || blob.includes('unlock') || blob.includes('ppv');
+    return signalScore >= 6;
   }
 
   function truncateId(value) {
@@ -1035,6 +1146,14 @@
   function resolveActiveClickSession(duration, url, rawMessageId, selectedAt) {
     const normalizedMessageId = normalizeIdCandidate(rawMessageId);
     if (normalizedMessageId) lastResolvedMessageId = normalizedMessageId;
+
+    const session = activeClickSession;
+    if (normalizedMessageId && session && session.target instanceof Element) {
+      try {
+        session.target.setAttribute('data-ofdv-message-id', normalizedMessageId);
+      } catch (_) {}
+    }
+
     if (rawMessageId && pinSummaryForMessageId(rawMessageId, selectedAt || Date.now())) {
       renderSummaryList();
     }
@@ -1050,14 +1169,23 @@
 
   function onDocumentClick(event) {
     if (overlayEl && event.target instanceof Node && overlayEl.contains(event.target)) return;
-    if (!isLikelyMessageInteraction(event.target)) return;
+
+    const nearbyLockedRoot = findBestLockedRootNearClick(event);
+    const interactionTarget =
+      nearbyLockedRoot || (event.target instanceof Element ? event.target : null);
+    if (!interactionTarget) return;
+    if (!isLikelyMessageInteraction(interactionTarget)) return;
 
     const selectedAt = Date.now();
-    const clickIds = collectIdsFromElement(event.target);
-    setActiveClickSession(clickIds.messageIds, event.target, selectedAt);
+    const clickIds = collectIdsFromElement(interactionTarget);
+    if (event.target instanceof Element && interactionTarget !== event.target) {
+      mergeIdSets(clickIds, collectIdsFromElement(event.target));
+    }
+    setActiveClickSession(clickIds.messageIds, interactionTarget, selectedAt, nearbyLockedRoot);
     pinSummariesForIdSet(clickIds.messageIds, selectedAt);
     debugLog('document click', {
       selectedAt,
+      nearbyLockedRoot: Boolean(nearbyLockedRoot),
       messageIds: Array.from(clickIds.messageIds),
       mediaIds: Array.from(clickIds.mediaIds),
       postIds: Array.from(clickIds.postIds),
@@ -1071,7 +1199,11 @@
     const matched = findDurationForIds(clickIds, { strictMessageOnly: true });
     if (matched) {
       debugLog('resolved from local duration index');
-      resolveActiveClickSession(matched.duration, matched.url || 'clicked-item', '', selectedAt);
+      const resolvedId =
+        clickIds.messageIds && clickIds.messageIds.size > 0
+          ? clickIds.messageIds.values().next().value
+          : '';
+      resolveActiveClickSession(matched.duration, matched.url || 'clicked-item', resolvedId, selectedAt);
       return;
     }
 
@@ -1089,6 +1221,13 @@
     }
 
     if (clickIds.messageIds.size === 0) {
+      const secondary = findDurationForIds(clickIds, { strictMessageOnly: false });
+      if (secondary && secondary.duration) {
+        debugLog('resolved from secondary duration index');
+        resolveActiveClickSession(secondary.duration, secondary.url || 'clicked-item', '', selectedAt);
+        return;
+      }
+
       const hybridFromCache = chooseHybridFallbackSummaryFromRows(
         summaryByMessageId.values(),
         activeClickSession && activeClickSession.clickFingerprint
@@ -1141,6 +1280,44 @@
 
     if (data.type === 'durationEntries') {
       ingestDurationEntries(data.entries);
+
+      const now = Date.now();
+      const session = getActiveClickSession(now);
+      if (!session) return;
+      if (!isEventFromCurrentClick(data, session)) return;
+
+      const url = typeof data.url === 'string' ? data.url : '';
+      const messageIdFromUrl = extractMessageIdFromApiUrl(url);
+      const expectedIds =
+        session.messageIds.size > 0
+          ? session.messageIds
+          : messageIdFromUrl
+            ? new Set([messageIdFromUrl])
+            : new Set();
+
+      let matchedIds = new Set();
+      if (expectedIds.size > 0) {
+        matchedIds = expectedIds;
+      } else if (Array.isArray(data.entries)) {
+        const unique = new Set();
+        for (const entry of data.entries) {
+          const mid = normalizeIdCandidate(entry && entry.messageId);
+          if (mid) unique.add(mid);
+          if (unique.size > 3) break;
+        }
+        if (unique.size === 1) matchedIds = unique;
+      }
+
+      if (matchedIds.size > 0) {
+        const matched = getBestEntryFromMap(durationByMessageId, matchedIds);
+        if (matched && matched.duration) {
+          debugLog('durationEntries resolved active session', {
+            messageIds: Array.from(matchedIds),
+            url,
+          });
+          resolveActiveClickSession(matched.duration, matched.url || url || 'clicked-item', '', now);
+        }
+      }
       return;
     }
 
@@ -1164,13 +1341,23 @@
           matched: Array.from(matchedMessageIds),
         });
       } else {
-        const hybridSummary = chooseHybridFallbackSummary(data.summaries, session.clickFingerprint);
-        const hybridMessageId = normalizeIdCandidate(hybridSummary && hybridSummary.messageId);
-        if (hybridMessageId) matchedMessageIds.add(hybridMessageId);
-        debugLog('hybrid summary match result', {
-          matched: Array.from(matchedMessageIds),
-          clickFingerprint: session.clickFingerprint,
-        });
+        const url = typeof data.url === 'string' ? data.url : '';
+        const messageIdFromUrl = extractMessageIdFromApiUrl(url);
+        if (messageIdFromUrl) {
+          matchedMessageIds.add(messageIdFromUrl);
+          debugLog('summary match by URL message ID', {
+            matched: Array.from(matchedMessageIds),
+            url,
+          });
+        } else {
+          const hybridSummary = chooseHybridFallbackSummary(data.summaries, session.clickFingerprint);
+          const hybridMessageId = normalizeIdCandidate(hybridSummary && hybridSummary.messageId);
+          if (hybridMessageId) matchedMessageIds.add(hybridMessageId);
+          debugLog('hybrid summary match result', {
+            matched: Array.from(matchedMessageIds),
+            clickFingerprint: session.clickFingerprint,
+          });
+        }
       }
 
       if (matchedMessageIds.size > 0) {
