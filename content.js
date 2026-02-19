@@ -514,6 +514,10 @@
         const value = node.getAttribute(attrName) || '';
         const lowerName = attrName.toLowerCase();
 
+        // Never treat our own attributes as ID sources.
+        // These can become stale when the host site virtualizes/recycles DOM nodes.
+        if (lowerName.startsWith('data-ofdv-')) continue;
+
         if (lowerName.includes('message')) addCandidate(ids.messageIds, value);
         if (lowerName.includes('media')) addCandidate(ids.mediaIds, value);
         if (lowerName.includes('post')) addCandidate(ids.postIds, value);
@@ -1146,13 +1150,6 @@
   function resolveActiveClickSession(duration, url, rawMessageId, selectedAt) {
     const normalizedMessageId = normalizeIdCandidate(rawMessageId);
     if (normalizedMessageId) lastResolvedMessageId = normalizedMessageId;
-
-    const session = activeClickSession;
-    if (normalizedMessageId && session && session.target instanceof Element) {
-      try {
-        session.target.setAttribute('data-ofdv-message-id', normalizedMessageId);
-      } catch (_) {}
-    }
 
     if (rawMessageId && pinSummaryForMessageId(rawMessageId, selectedAt || Date.now())) {
       renderSummaryList();
