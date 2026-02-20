@@ -399,10 +399,11 @@
     activeClickSession = null;
   }
 
-  function setActiveClickSession(messageIds, target, startedAt, preferredRoot) {
+  function setActiveClickSession(messageIds, target, startedAt, preferredRoot, options) {
     clearClickSessionTimer();
     const normalizedMessageIds = normalizeIdSet(messageIds);
     const clickFingerprint = extractClickFingerprint(target, preferredRoot);
+    const allowHybridFallback = !(options && options.allowHybridFallback === false);
     activeClickSession = {
       startedAt,
       messageIds: normalizedMessageIds,
@@ -415,11 +416,13 @@
             ? target
             : null,
       clickFingerprint,
+      allowHybridFallback,
     };
     debugLog('session started', {
       startedAt,
       messageIds: Array.from(normalizedMessageIds),
       clickFingerprint,
+      allowHybridFallback,
     });
 
     clickSessionTimer = window.setTimeout(() => {
@@ -480,6 +483,8 @@
   function collectIdsFromText(text, ids) {
     if (!text || typeof text !== 'string') return;
     const patterns = [
+      // Common URL param used by message permalinks.
+      { type: 'message', re: /(?:^|[?&])message=([a-z0-9_-]{2,})/gi },
       { type: 'message', re: /message(?:_|-|\/)?id(?:=|:|\/|-)?([a-z0-9_-]{2,})/gi },
       { type: 'media', re: /media(?:_|-|\/)?id(?:=|:|\/|-)?([a-z0-9_-]{2,})/gi },
       { type: 'post', re: /post(?:_|-|\/)?id(?:=|:|\/|-)?([a-z0-9_-]{2,})/gi },
@@ -518,9 +523,17 @@
         // These can become stale when the host site virtualizes/recycles DOM nodes.
         if (lowerName.startsWith('data-ofdv-')) continue;
 
-        if (lowerName.includes('message')) addCandidate(ids.messageIds, value);
-        if (lowerName.includes('media')) addCandidate(ids.mediaIds, value);
-        if (lowerName.includes('post')) addCandidate(ids.postIds, value);
+        // Be conservative: only treat attribute values as IDs when the attribute name
+        // looks like an ID field (to avoid picking up counts/indices/chatIds/etc.).
+        if ((lowerName.includes('message') && lowerName.includes('id')) || lowerName === 'message') {
+          addCandidate(ids.messageIds, value);
+        }
+        if ((lowerName.includes('media') && lowerName.includes('id')) || lowerName === 'media') {
+          addCandidate(ids.mediaIds, value);
+        }
+        if ((lowerName.includes('post') && lowerName.includes('id')) || lowerName === 'post') {
+          addCandidate(ids.postIds, value);
+        }
 
         collectIdsFromText(`${lowerName}=${value}`, ids);
       }
@@ -554,6 +567,27 @@
       best = chooseBetterEntry(best, entry || null);
     }
     return best;
+  }
+
+  function getBestEntryFromMapWithId(map, idSet) {
+    let bestEntry = null;
+    let bestId = '';
+    for (const id of idSet) {
+      const entry = map.get(id) || null;
+      if (!entry) continue;
+      if (!bestEntry) {
+        bestEntry = entry;
+        bestId = id;
+        continue;
+      }
+      const chosen = chooseBetterEntry(bestEntry, entry);
+      if (chosen === entry) {
+        bestEntry = entry;
+        bestId = id;
+      }
+    }
+    if (!bestEntry) return null;
+    return { entry: bestEntry, id: bestId };
   }
 
   function findDurationForIds(ids, options) {
@@ -1178,8 +1212,47 @@
     if (event.target instanceof Element && interactionTarget !== event.target) {
       mergeIdSets(clickIds, collectIdsFromElement(event.target));
     }
-    setActiveClickSession(clickIds.messageIds, interactionTarget, selectedAt, nearbyLockedRoot);
-    pinSummariesForIdSet(clickIds.messageIds, selectedAt);
+
+    // If the click happened on (or inside) a permalink, prefer that message id.
+    // This avoids ambiguous/stale IDs collected from ancestor containers.
+    let primaryMessageId = '';
+    if (event.target instanceof Element) {
+      const linkEl = event.target.closest('a[href]');
+      if (linkEl) {
+        primaryMessageId = extractMessageIdFromApiUrl(linkEl.getAttribute('href') || '');
+      }
+    }
+    if (!primaryMessageId && interactionTarget instanceof Element && interactionTarget.querySelector) {
+      const hintLink = interactionTarget.querySelector(
+        'a[href*="message="], a[href*="/messages/"], a[href*="/ppv/"]'
+      );
+      if (hintLink) {
+        primaryMessageId = extractMessageIdFromApiUrl(hintLink.getAttribute('href') || '');
+      }
+    }
+    if (primaryMessageId) {
+      clickIds.messageIds.clear();
+      clickIds.messageIds.add(primaryMessageId);
+    }
+
+    const hadAmbiguousMessageIds = !primaryMessageId && clickIds.messageIds.size > 1;
+
+    let sessionMessageIds = clickIds.messageIds;
+    if (hadAmbiguousMessageIds) {
+      // Multiple message IDs almost always means we picked up unrelated/stale IDs from
+      // ancestor containers in a virtualized/recycled list. Treat as ambiguous and
+      // let the hook resolve by URL/fingerprint instead of hard-gating on the wrong IDs.
+      debugLog('ambiguous click IDs -> ignore messageIds', {
+        messageIds: Array.from(clickIds.messageIds).slice(0, 6),
+        total: clickIds.messageIds.size,
+      });
+      sessionMessageIds = new Set();
+    }
+
+    setActiveClickSession(sessionMessageIds, interactionTarget, selectedAt, nearbyLockedRoot, {
+      allowHybridFallback: !hadAmbiguousMessageIds,
+    });
+    if (sessionMessageIds.size > 0) pinSummariesForIdSet(sessionMessageIds, selectedAt);
     debugLog('document click', {
       selectedAt,
       nearbyLockedRoot: Boolean(nearbyLockedRoot),
@@ -1193,64 +1266,48 @@
       showOverlay(HOOK_MISSING_TEXT, false);
     }
 
-    const matched = findDurationForIds(clickIds, { strictMessageOnly: true });
-    if (matched) {
-      debugLog('resolved from local duration index');
-      const resolvedId =
-        clickIds.messageIds && clickIds.messageIds.size > 0
-          ? clickIds.messageIds.values().next().value
-          : '';
-      resolveActiveClickSession(matched.duration, matched.url || 'clicked-item', resolvedId, selectedAt);
-      return;
+    const effectiveClickIds = {
+      messageIds: sessionMessageIds,
+      mediaIds: hadAmbiguousMessageIds ? new Set() : clickIds.mediaIds,
+      postIds: hadAmbiguousMessageIds ? new Set() : clickIds.postIds,
+    };
+
+    const hasUnambiguousMessageId = effectiveClickIds.messageIds.size === 1;
+    if (hasUnambiguousMessageId) {
+      const matchedById = getBestEntryFromMapWithId(durationByMessageId, effectiveClickIds.messageIds);
+      if (matchedById && matchedById.entry && matchedById.entry.duration) {
+        debugLog('resolved from local duration index');
+        resolveActiveClickSession(
+          matchedById.entry.duration,
+          matchedById.entry.url || 'clicked-item',
+          matchedById.id,
+          selectedAt
+        );
+        return;
+      }
     }
 
-    const summaryMatch = findBestSummaryForIds(clickIds);
-    const resolvedSummaryDuration = resolveSummaryDuration(summaryMatch);
-    if (summaryMatch && resolvedSummaryDuration && resolvedSummaryDuration.text) {
-      debugLog('resolved from cached summary match', { messageId: summaryMatch.messageId || '' });
-      resolveActiveClickSession(
-        resolvedSummaryDuration.text,
-        summaryMatch.messageUrl || summaryMatch.url || 'clicked-item',
-        summaryMatch.messageId || '',
-        selectedAt
-      );
-      return;
+    if (hasUnambiguousMessageId) {
+      const summaryMatch = findBestSummaryForIds(effectiveClickIds);
+      const resolvedSummaryDuration = resolveSummaryDuration(summaryMatch);
+      if (summaryMatch && resolvedSummaryDuration && resolvedSummaryDuration.text) {
+        debugLog('resolved from cached summary match', { messageId: summaryMatch.messageId || '' });
+        resolveActiveClickSession(
+          resolvedSummaryDuration.text,
+          summaryMatch.messageUrl || summaryMatch.url || 'clicked-item',
+          summaryMatch.messageId || '',
+          selectedAt
+        );
+        return;
+      }
     }
 
-    if (clickIds.messageIds.size === 0) {
-      const secondary = findDurationForIds(clickIds, { strictMessageOnly: false });
+    if (!hadAmbiguousMessageIds && effectiveClickIds.messageIds.size === 0) {
+      const secondary = findDurationForIds(effectiveClickIds, { strictMessageOnly: false });
       if (secondary && secondary.duration) {
         debugLog('resolved from secondary duration index');
         resolveActiveClickSession(secondary.duration, secondary.url || 'clicked-item', '', selectedAt);
         return;
-      }
-
-      const hybridFromCache = chooseHybridFallbackSummaryFromRows(
-        summaryByMessageId.values(),
-        activeClickSession && activeClickSession.clickFingerprint
-      );
-      if (hybridFromCache) {
-        const cachedMessageId = normalizeIdCandidate(hybridFromCache.messageId);
-        const cachedResolvedDuration = resolveSummaryDuration(hybridFromCache);
-        const cachedDuration =
-          cachedResolvedDuration && cachedResolvedDuration.text
-            ? cachedResolvedDuration.text
-            : '';
-        if (cachedMessageId && cachedDuration) {
-          debugLog('resolved from cached hybrid fallback', {
-            messageId: cachedMessageId,
-            imageCount: Number(hybridFromCache.imageCount) || 0,
-            videoCount: Number(hybridFromCache.videoCount) || 0,
-            totalVideoSeconds: Number(hybridFromCache.totalVideoSeconds) || 0,
-          });
-          resolveActiveClickSession(
-            cachedDuration,
-            hybridFromCache.messageUrl || hybridFromCache.url || 'clicked-item',
-            cachedMessageId,
-            selectedAt
-          );
-          return;
-        }
       }
     }
 
@@ -1346,7 +1403,7 @@
             matched: Array.from(matchedMessageIds),
             url,
           });
-        } else {
+        } else if (session.allowHybridFallback !== false) {
           const hybridSummary = chooseHybridFallbackSummary(data.summaries, session.clickFingerprint);
           const hybridMessageId = normalizeIdCandidate(hybridSummary && hybridSummary.messageId);
           if (hybridMessageId) matchedMessageIds.add(hybridMessageId);
@@ -1354,6 +1411,8 @@
             matched: Array.from(matchedMessageIds),
             clickFingerprint: session.clickFingerprint,
           });
+        } else {
+          debugLog('hybrid summary fallback disabled for active session');
         }
       }
 
@@ -1404,7 +1463,7 @@
 
     const messageIdFromUrl = extractMessageIdFromApiUrl(url);
     if (!messageIdFromUrl) return;
-    if (session.messageIds.size === 0 || !session.messageIds.has(messageIdFromUrl)) return;
+    if (session.messageIds.size > 0 && !session.messageIds.has(messageIdFromUrl)) return;
     debugLog('duration matched by URL message ID', {
       messageIdFromUrl,
       durationText,
